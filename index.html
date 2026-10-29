@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>On-Chain Wordle dApp</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.2/ethers.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #121213;
+      --surface: #1e1e20;
+      --border: #3a3a3c;
+      --text: #ffffff;
+      --muted: #818384;
+      --green: #538d4e;
+      --yellow: #b59f3b;
+      --grey: #3a3a3c;
+      --accent: #6366f1;
+      --danger: #ef4444;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 20px; }
+    header { width: 100%; max-width: 520px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 18px; }
+    .title { font-size: 1.5rem; font-weight: 800; letter-spacing: 2px; }
+    .badge { background: var(--surface); border: 1px solid var(--border); padding: 4px 10px; border-radius: 6px; font-size: 0.8rem; color: var(--muted); }
+    button { background: var(--accent); color: white; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; }
+    button:hover { opacity: 0.9; }
+    button:disabled { background: var(--border); cursor: not-allowed; }
+    .btn-danger { background: var(--danger); }
+    .config-card { width: 100%; max-width: 520px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; }
+    .config-card input { flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px 12px; border-radius: 6px; font-size: 0.85rem; }
+    #board { display: grid; grid-template-rows: repeat(6, 1fr); gap: 6px; margin-bottom: 22px; }
+    .row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+    .tile { width: 58px; height: 58px; border: 2px solid var(--border); display: flex; justify-content: center; align-items: center; font-size: 1.8rem; font-weight: 700; text-transform: uppercase; border-radius: 4px; transition: all 0.3s ease; }
+    .tile.state-0 { background: var(--grey); border-color: var(--grey); }
+    .tile.state-1 { background: var(--yellow); border-color: var(--yellow); }
+    .tile.state-2 { background: var(--green); border-color: var(--green); }
+    .controls { display: flex; gap: 10px; width: 100%; max-width: 340px; margin-bottom: 16px; }
+    .controls input { flex: 1; background: var(--surface); border: 2px solid var(--border); color: var(--text); padding: 12px; font-size: 1.1rem; text-transform: uppercase; text-align: center; letter-spacing: 4px; border-radius: 8px; outline: none; }
+    .controls input:focus { border-color: var(--accent); }
+    #status { min-height: 24px; font-size: 0.92rem; color: #a5b4fc; margin-bottom: 20px; text-align: center; }
+    #adminPanel { width: 100%; max-width: 520px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; font-size: 0.85rem; display: none; }
+    summary { cursor: pointer; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+    .admin-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .admin-row input { flex: 1; min-width: 150px; background: var(--bg); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px; text-transform: uppercase; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <div class="title">WORDLE // CHAIN</div>
+      <span id="roundBadge" class="badge">Round: -</span>
+    </div>
+    <button id="connectBtn" onclick="connectWallet()">Connect Wallet</button>
+  </header>
+
+  <!-- Contract Address Bar (Defaults to your deployed contract) -->
+  <div class="config-card">
+    <input type="text" id="contractAddressInput" placeholder="Contract Address (0x...)" value="0x012C6805FAdeD257cb392cd56cfb00afd24748A" />
+    <button onclick="loadContractState()">Load Game</button>
+  </div>
+
+  <!-- 6x5 Board -->
+  <div id="board"></div>
+
+  <!-- Input Form -->
+  <div class="controls">
+    <input type="text" id="guessInput" maxlength="5" placeholder="GUESS" />
+    <button id="submitBtn" onclick="submitGuess()" disabled>Submit</button>
+  </div>
+
+  <div id="status">Connect your wallet to begin.</div>
+
+  <!-- Owner Admin Panel (Hidden by default; only rendered if connected wallet === owner) -->
+  <div id="adminPanel">
+    <details open>
+      <summary>Admin Controls (Owner Only)</summary>
+      <div class="admin-row">
+        <input type="text" id="newWordInput" maxlength="5" placeholder="New 5-letter word" />
+        <button onclick="setNewWord()">Next Round (+1)</button>
+        <button class="btn-danger" onclick="resetGame()">Reset to Round #1</button>
+      </div>
+    </details>
+  </div>
+
+  <script>
+    const CONTRACT_ABI = [
+      "function owner() external view returns (address)",
+      "function submitGuess(string _guess) external returns (uint8[5])",
+      "function setNewWord(string _newSolution) external",
+      "function resetToRoundOne(string _newSolution) external",
+      "function currentRound() external view returns (uint256)",
+      "function hasWon(uint256, address) external view returns (bool)",
+      {
+        "inputs": [{ "internalType": "address", "name": "_player", "type": "address" }],
+        "name": "getPlayerState",
+        "outputs": [
+          { "internalType": "string[]", "name": "words", "type": "string[]" },
+          { "internalType": "uint8[5][]", "name": "feedbacks", "type": "uint8[5][]" },
+          { "internalType": "bool", "name": "won", "type": "bool" },
+          { "internalType": "uint8", "name": "attemptsUsed", "type": "uint8" },
+          { "internalType": "uint256", "name": "round", "type": "uint256" }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      }
+    ];
+
+    let provider, signer, userAddress, contract;
+
+    function initBoard() {
+      const board = document.getElementById("board");
+      board.innerHTML = "";
+      for (let r = 0; r < 6; r++) {
+        const row = document.createElement("div");
+        row.className = "row";
+        for (let c = 0; c < 5; c++) {
+          const tile = document.createElement("div");
+          tile.className = "tile";
+          tile.id = `tile-${r}-${c}`;
+          row.appendChild(tile);
+        }
+        board.appendChild(row);
+      }
+    }
+
+    async function connectWallet() {
+      if (!window.ethereum) {
+        setStatus("MetaMask not detected! Please install the MetaMask extension.");
+        return;
+      }
+      try {
+        provider = new ethers.BrowserProvider(window.ethereum);
+        await provider.send("eth_requestAccounts", []);
+
+        const network = await provider.getNetwork();
+        if (Number(network.chainId) !== 11155111) {
+          try {
+            await window.ethereum.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: '0xaa36a7' }],
+            });
+            provider = new ethers.BrowserProvider(window.ethereum);
+          } catch (switchError) {
+            setStatus("Please switch MetaMask to Sepolia network.");
+            return;
+          }
+        }
+
+        signer = await provider.getSigner();
+        userAddress = await signer.getAddress();
+
+        document.getElementById("connectBtn").innerText =
+          userAddress.slice(0, 6) + "..." + userAddress.slice(-4);
+        setStatus("Wallet connected!");
+
+        const addr = document.getElementById("contractAddressInput").value.trim();
+        if (addr) await loadContractState();
+      } catch (err) {
+        setStatus("Connection failed: " + (err.shortMessage || err.message));
+      }
+    }
+
+    async function loadContractState() {
+      const address = document.getElementById("contractAddressInput").value.trim();
+      if (!ethers.isAddress(address)) {
+        setStatus("Please enter a valid contract address.");
+        return;
+      }
+      if (!signer) {
+        await connectWallet();
+        if (!signer) return;
+      }
+
+      try {
+        contract = new ethers.Contract(address, CONTRACT_ABI, signer);
+        setStatus("Loading game state...");
+
+        // Check ownership to conditionally show admin panel
+        try {
+          const contractOwner = await contract.owner();
+          const adminPanel = document.getElementById("adminPanel");
+          if (contractOwner.toLowerCase() === userAddress.toLowerCase()) {
+            adminPanel.style.display = "block";
+          } else {
+            adminPanel.style.display = "none";
+          }
+        } catch (e) {
+          document.getElementById("adminPanel").style.display = "none";
+        }
+
+        let words = [];
+        let feedbacks = [];
+        let won = false;
+        let attemptsUsed = 0;
+        let round = 1;
+
+        try {
+          const state = await contract.getPlayerState(userAddress);
+          words = state.words || state[0];
+          feedbacks = state.feedbacks || state[1];
+          won = state.won !== undefined ? state.won : state[2];
+          attemptsUsed = Number(state.attemptsUsed !== undefined ? state.attemptsUsed : state[3]);
+          round = Number(state.round !== undefined ? state.round : state[4]);
+        } catch (tupleErr) {
+          const r = await contract.currentRound();
+          round = Number(r);
+          won = await contract.hasWon(round, userAddress);
+          attemptsUsed = 0;
+        }
+
+        initBoard();
+        document.getElementById("roundBadge").innerText = `Round #${round}`;
+
+        for (let r = 0; r < words.length; r++) {
+          const word = words[r];
+          const fb = feedbacks[r];
+          for (let c = 0; c < 5; c++) {
+            const tile = document.getElementById(`tile-${r}-${c}`);
+            if (tile) {
+              tile.innerText = word[c];
+              tile.classList.add(`state-${Number(fb[c])}`);
+            }
+          }
+        }
+
+        if (won) {
+          setStatus(`Round #${round} solved in ${attemptsUsed}/6 attempts! 🎉`);
+          document.getElementById("submitBtn").disabled = true;
+        } else if (attemptsUsed >= 6) {
+          setStatus(`Game Over! You used all 6 attempts for Round #${round}.`);
+          document.getElementById("submitBtn").disabled = true;
+        } else {
+          setStatus(`Ready! Attempt ${attemptsUsed + 1} of 6.`);
+          document.getElementById("submitBtn").disabled = false;
+        }
+      } catch (err) {
+        setStatus("Error loading contract: " + (err.shortMessage || err.message));
+      }
+    }
+
+    async function submitGuess() {
+      const guess = document.getElementById("guessInput").value.trim();
+      if (!/^[a-zA-Z]{5}$/.test(guess)) {
+        setStatus("Please enter a valid 5-letter word.");
+        return;
+      }
+      try {
+        document.getElementById("submitBtn").disabled = true;
+        setStatus("Confirm guess in MetaMask...");
+        const tx = await contract.submitGuess(guess);
+        setStatus("Verifying guess on Sepolia...");
+        await tx.wait();
+        document.getElementById("guessInput").value = "";
+        await loadContractState();
+      } catch (err) {
+        setStatus("Guess failed: " + (err.reason || err.shortMessage || err.message));
+        document.getElementById("submitBtn").disabled = false;
+      }
+    }
+
+    async function setNewWord() {
+      const newWord = document.getElementById("newWordInput").value.trim();
+      if (!/^[a-zA-Z]{5}$/.test(newWord)) {
+        setStatus("Secret word must be 5 letters (A-Z).");
+        return;
+      }
+      try {
+        setStatus("Confirm next round in MetaMask...");
+        const tx = await contract.setNewWord(newWord);
+        setStatus("Starting new round on-chain...");
+        await tx.wait();
+        document.getElementById("newWordInput").value = "";
+        await loadContractState();
+      } catch (err) {
+        setStatus("Failed: " + (err.reason || err.shortMessage || err.message));
+      }
+    }
+
+    async function resetGame() {
+      const newWord = document.getElementById("newWordInput").value.trim();
+      if (!/^[a-zA-Z]{5}$/.test(newWord)) {
+        setStatus("Enter a fresh 5-letter word in the box to reset Round #1.");
+        return;
+      }
+      try {
+        setStatus("Confirm reset to Round #1 in MetaMask...");
+        const tx = await contract.resetToRoundOne(newWord);
+        setStatus("Resetting round counter to 1...");
+        await tx.wait();
+        document.getElementById("newWordInput").value = "";
+        await loadContractState();
+      } catch (err) {
+        setStatus("Reset failed: " + (err.reason || err.shortMessage || err.message));
+      }
+    }
+
+    function setStatus(msg) {
+      document.getElementById("status").innerText = msg;
+    }
+
+    initBoard();
+  </script>
+</body>
+</html>
